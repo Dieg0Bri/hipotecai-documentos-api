@@ -37,8 +37,12 @@ class BaseExtractor(ABC):
     # ───── Plumbing común ─────
 
     def extract(self, text: str) -> ExtractionResult:
-        if not settings.GEMINI_API_KEY:
-            logger.warning("GEMINI_API_KEY ausente — extracción vacía.")
+        # Vertex AI con ADC (Application Default Credentials del SA del Cloud Run)
+        # es el modo preferido. Si VERTEX_AI=false cae al modo Generative Language API
+        # con GEMINI_API_KEY (obsoleto, solo para entornos sin GCP).
+        use_vertex = settings.VERTEX_AI and settings.GOOGLE_CLOUD_PROJECT
+        if not use_vertex and not settings.GEMINI_API_KEY:
+            logger.warning("Sin VERTEX_AI ni GEMINI_API_KEY — extracción vacía.")
             return ExtractionResult(tipo=self.tipo, datos={}, confianza=0.0)
 
         try:
@@ -66,13 +70,25 @@ class BaseExtractor(ABC):
         except ImportError:
             examples = self.examples()
 
+        # language_model_params se pasa al constructor de GeminiLanguageModel.
+        # Si vertexai=True, langextract usa google.genai con ADC sin API key.
+        if use_vertex:
+            lm_params = {
+                "vertexai": True,
+                "project": settings.GOOGLE_CLOUD_PROJECT,
+                "location": settings.VERTEX_LOCATION,
+            }
+            extract_kwargs = {"language_model_params": lm_params}
+        else:
+            extract_kwargs = {"api_key": settings.GEMINI_API_KEY}
+
         lx_result = lx.extract(
             text_or_documents=text[:80_000],
             prompt_description=self.prompt(),
             examples=examples,
             model_id=settings.GEMINI_MODEL_ID,
-            api_key=settings.GEMINI_API_KEY,
             temperature=settings.LANGEXTRACT_TEMPERATURE,
+            **extract_kwargs,
         )
 
         extractions = list(getattr(lx_result, "extractions", []) or [])

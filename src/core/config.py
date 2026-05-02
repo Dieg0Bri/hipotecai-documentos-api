@@ -13,6 +13,13 @@ class Settings:
     GOOGLE_CLOUD_PROJECT: str = config("GOOGLE_CLOUD_PROJECT", default="")
     GCS_BUCKET_DOCUMENTOS: str = config("GCS_BUCKET_DOCUMENTOS", default="hipotecai-documentos")
 
+    # Vertex AI (preferido). Si VERTEX_AI=true usa la cuenta de servicio del
+    # Cloud Run con roles/aiplatform.user — sin API key. Cuotas más altas y
+    # billing unificado con el resto del proyecto GCP.
+    VERTEX_AI: bool = config("VERTEX_AI", default=True, cast=bool)
+    VERTEX_LOCATION: str = config("VERTEX_LOCATION", default="global")
+
+    # Generative Language API (fallback si VERTEX_AI=false)
     GEMINI_API_KEY: str = config("GEMINI_API_KEY", default="")
     GEMINI_MODEL_ID: str = config("GEMINI_MODEL_ID", default="gemini-2.5-flash")
     LANGEXTRACT_TEMPERATURE: float = config("LANGEXTRACT_TEMPERATURE", default=0.1, cast=float)
