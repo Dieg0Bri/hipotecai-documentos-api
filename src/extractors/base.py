@@ -103,20 +103,86 @@ class BaseExtractor(ABC):
 
 # Helper: resolver extractor por tipo
 def get_extractor(tipo: TipoDocumento) -> "BaseExtractor":
-    from src.extractors.escritura import EscrituraExtractor
+    # Imports diferidos para evitar ciclos.
+    from src.extractors.escritura import (
+        EscrituraExtractor, EscrituraCompraventaExtractor, EscrituraAnteriorExtractor,
+    )
     from src.extractors.cert_dominio_vigente import CertDominioVigenteExtractor
     from src.extractors.cert_hipotecas_gravamenes import CertHipotecasExtractor
     from src.extractors.cert_avaluo_sii import CertAvaluoSiiExtractor
     from src.extractors.cert_municipal import CertMunicipalExtractor
     from src.extractors.plano_propiedad import PlanoPropiedadExtractor
     from src.extractors.plan_regulador import PlanReguladorExtractor
+    from src.extractors.carnet_identidad import CarnetIdentidadExtractor
+    from src.extractors.cert_estado_civil import (
+        CertMatrimonioExtractor, CertUnionCivilExtractor,
+        CertSolteriaExtractor, CertDefuncionExtractor, DeclJuradaSolteriaExtractor,
+    )
+    from src.extractors.cert_deuda_contribuciones import CertDeudaContribucionesExtractor
+    from src.extractors.certs_dom import (
+        CertNoExpropiacionDomExtractor, CertNoExpropiacionServiuExtractor,
+        CertNumeroDomExtractor, CertRecepcionFinalDomExtractor,
+    )
+    from src.extractors.condicionales import (
+        ERutSiiExtractor, EscrituraConstitucionSocialExtractor, CertVigenciaPoderesExtractor,
+        CertDeudaGastosComunesExtractor, ActaAsambleaCopropietariosExtractor,
+        ResolucionServiuExtractor,
+        SentenciaJudicialExtractor, CertEjecutoriaExtractor,
+        CertSubdivisionSagExtractor, PlanoSubdivisionSagExtractor, CertConadiExtractor,
+        CertPosesionEfectivaExtractor, CertExencionHerenciaSiiExtractor,
+        EscrituraAlzamientoHipotecaExtractor, EscrituraBienFamiliarExtractor,
+        EscrituraRenunciaUsufructoExtractor,
+    )
 
-    mapping: dict[TipoDocumento, type[BaseExtractor]] = {
-        "escritura": EscrituraExtractor,
+    mapping: dict[str, type[BaseExtractor]] = {
+        # CBR
         "cert_dominio_vigente": CertDominioVigenteExtractor,
         "cert_hipotecas_gravamenes": CertHipotecasExtractor,
+        # Escrituras
+        "escritura": EscrituraExtractor,
+        "escritura_compraventa": EscrituraCompraventaExtractor,
+        "escritura_anterior": EscrituraAnteriorExtractor,
+        "escritura_alzamiento_hipoteca": EscrituraAlzamientoHipotecaExtractor,
+        "escritura_bien_familiar": EscrituraBienFamiliarExtractor,
+        "escritura_renuncia_usufructo": EscrituraRenunciaUsufructoExtractor,
+        # Tributario
         "cert_avaluo_sii": CertAvaluoSiiExtractor,
-        "cert_municipal": CertMunicipalExtractor,
+        "cert_deuda_contribuciones": CertDeudaContribucionesExtractor,
+        # Identidad
+        "carnet_identidad": CarnetIdentidadExtractor,
+        # Estado civil
+        "cert_matrimonio": CertMatrimonioExtractor,
+        "cert_union_civil": CertUnionCivilExtractor,
+        "cert_solteria": CertSolteriaExtractor,
+        "cert_defuncion": CertDefuncionExtractor,
+        "decl_jurada_solteria": DeclJuradaSolteriaExtractor,
+        # DOM / SERVIU
+        "cert_no_expropiacion_dom": CertNoExpropiacionDomExtractor,
+        "cert_no_expropiacion_serviu": CertNoExpropiacionServiuExtractor,
+        "cert_numero_dom": CertNumeroDomExtractor,
+        "cert_recepcion_final_dom": CertRecepcionFinalDomExtractor,
+        "cert_municipal": CertMunicipalExtractor,  # legacy genérico
+        # Persona jurídica
+        "e_rut_sii": ERutSiiExtractor,
+        "escritura_constitucion_social": EscrituraConstitucionSocialExtractor,
+        "cert_vigencia_poderes": CertVigenciaPoderesExtractor,
+        # Condominio
+        "cert_deuda_gastos_comunes": CertDeudaGastosComunesExtractor,
+        "acta_asamblea_copropietarios": ActaAsambleaCopropietariosExtractor,
+        # SERVIU subsidio
+        "resolucion_serviu": ResolucionServiuExtractor,
+        # Tribunales
+        "sentencia_judicial": SentenciaJudicialExtractor,
+        "cert_ejecutoria": CertEjecutoriaExtractor,
+        # Rural
+        "cert_subdivision_sag": CertSubdivisionSagExtractor,
+        "plano_subdivision_sag": PlanoSubdivisionSagExtractor,
+        # Indígena
+        "cert_conadi": CertConadiExtractor,
+        # Herencia
+        "cert_posesion_efectiva": CertPosesionEfectivaExtractor,
+        "cert_exencion_herencia_sii": CertExencionHerenciaSiiExtractor,
+        # Planos
         "plano_propiedad": PlanoPropiedadExtractor,
         "plan_regulador": PlanReguladorExtractor,
     }
