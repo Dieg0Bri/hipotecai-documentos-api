@@ -1,0 +1,9 @@
+[project]
+name = "documentos-api"
+version = "0.0.1"
+description = "Extracción estructurada de campos legales por tipo de documento (langextract)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
