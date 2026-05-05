@@ -39,5 +39,10 @@ class Settings:
         cast=lambda v: [s.strip() for s in v.split(",")],
     )
 
+    # Fallback OCR — si el PDF llega sin texto seleccionable, llamamos a
+    # ocr-api (Surya). Vacío = no hay fallback (devolvemos NO_TEXT al caller).
+    OCR_API_URL: str = config("OCR_API_URL", default="")
+    OCR_API_TIMEOUT_S: int = config("OCR_API_TIMEOUT_S", default=180, cast=int)
+
 
 settings = Settings()
