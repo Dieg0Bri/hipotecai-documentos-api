@@ -107,16 +107,18 @@ class CloudSQLHandler:
                         INSERT INTO dt_extraccion_evidencia (
                             id_tenant, id_extraccion, id_archivo, campo, page,
                             char_start, char_end, snippet, sha256_documento, confianza,
-                            fuente_texto, id_ocr, confianza_ocr
+                            fuente_texto, id_ocr, confianza_ocr, bboxes
                         )
                         VALUES (
                             :id_tenant, :id_extraccion, :id_archivo, :campo, :page,
                             :char_start, :char_end, :snippet, :sha, :confianza,
-                            :fuente_texto, :id_ocr, :confianza_ocr
+                            :fuente_texto, :id_ocr, :confianza_ocr,
+                            CAST(:bboxes AS JSONB)
                         )
                         """
                     )
                     for ev in evidencia:
+                        bboxes = ev.get("bboxes")
                         await session.execute(ins_ev, {
                             "id_tenant": id_tenant,
                             "id_extraccion": id_extraccion,
@@ -131,6 +133,7 @@ class CloudSQLHandler:
                             "fuente_texto": ev.get("fuente_texto", "pdf_text"),
                             "id_ocr": ev.get("id_ocr"),
                             "confianza_ocr": ev.get("confianza_ocr"),
+                            "bboxes": json.dumps(bboxes) if bboxes else None,
                         })
 
             await session.execute(
@@ -201,7 +204,7 @@ class CloudSQLHandler:
                     """
                     SELECT e.id_evidencia, e.campo, e.page, e.char_start, e.char_end,
                            e.snippet, e.sha256_documento, e.confianza,
-                           e.fuente_texto, e.id_ocr, e.confianza_ocr,
+                           e.fuente_texto, e.id_ocr, e.confianza_ocr, e.bboxes,
                            op.id_ocr_documento, doc.modelo AS ocr_modelo,
                            doc.gcs_uri AS ocr_md_uri,
                            op.char_start AS ocr_pagina_char_start,
@@ -260,14 +263,23 @@ class CloudSQLHandler:
             return dict(row) if row else None
 
     async def get_ocr_paginas_with_offsets(self, id_ocr_documento: int) -> list[dict]:
-        """Para reconstruir PageContent[] desde el markdown OCR."""
+        """Para reconstruir PageContent[] desde el markdown OCR.
+
+        Devuelve tambien `lines` (JSONB) para que `_build_evidencia()` pueda
+        resolver el overlap span↔linea y calcular las bboxes de cada
+        evidencia. Cada item en lines tiene shape:
+            {text, bbox, confidence, char_start, char_end}
+        donde char_start/char_end son offsets relativos a `page_text`
+        (NO al markdown completo) y bbox esta en puntos PDF.
+        """
         if not self.engine:
             return []
         async with self.session_factory() as session:
             res = await session.execute(
                 text(
                     """
-                    SELECT id_ocr_pagina, pagina, char_start, char_end, confianza_promedio
+                    SELECT id_ocr_pagina, pagina, char_start, char_end,
+                           confianza_promedio, lines
                     FROM dt_ocr_pagina
                     WHERE id_ocr_documento = :id
                     ORDER BY pagina ASC

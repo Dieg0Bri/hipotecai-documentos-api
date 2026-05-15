@@ -46,6 +46,12 @@ class PageContent:
     source: str = "empty"              # "pdf_text" | "ocr" | "empty"
     id_ocr: int | None = None
     confianza_ocr_promedio: float | None = None
+    # Solo source='ocr': lineas OCR con bbox (PT) y offsets locales al
+    # texto de esta pagina. Usado por _build_evidencia para resolver bboxes
+    # de cada span por overlap. None en pdf_text.
+    # Shape: [{text, bbox: [x0,y0,x1,y1] en pt, confidence,
+    #          char_start, char_end (relativos a self.text)}, ...]
+    lines: list[dict] | None = None
 
 
 # Heurística: una página con menos de este número de caracteres alfanuméricos
