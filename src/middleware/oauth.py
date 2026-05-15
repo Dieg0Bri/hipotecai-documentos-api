@@ -56,6 +56,13 @@ def _verify_google_id_token(token: str, expected_audience: str) -> dict | None:
 
 class GoogleOAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable]):
+        # CORS preflights (OPTIONS) van SIN Authorization header por spec del
+        # browser. Que pasen para que CORSMiddleware genere el response con
+        # los Access-Control-Allow-* headers. La request real (POST/GET) que
+        # viene despues sí trae el bearer y la validamos normal.
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         path = request.url.path
         if any(path.startswith(p) for p in PUBLIC_PREFIXES):
             return await call_next(request)
