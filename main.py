@@ -113,8 +113,14 @@ def _build_evidencia(
     en dt_ocr_resultado. Sin esto el abogado no podría distinguir un campo
     extraído del texto nativo del PDF (autoridad alta) de uno extraído de
     una transcripción de modelo (probabilística).
+
+    Para OCR adicionalmente resolvemos las bboxes de las lineas Surya que
+    overlapean el span (en coords PDF). Esto permite al frontend dibujar
+    el highlight directo sobre el canvas sin depender del text-layer.
     """
     page_meta = {p.page: p for p in pages_local}
+    # Indice page→global_start para mapear span_global a span_local_de_pagina.
+    page_global_start = {o.page: o.start for o in (page_offsets or [])}
     evidencia: list[dict] = []
     for span in spans or []:
         cs = span.get("start_char")
@@ -126,6 +132,9 @@ def _build_evidencia(
         page_obj = page_meta.get(page_num) if page_num else None
 
         is_ocr = bool(page_obj and page_obj.source == "ocr")
+        bboxes = _bboxes_for_span(
+            cs, ce, page_num, page_obj, page_global_start,
+        ) if is_ocr else None
         evidencia.append({
             "campo": span.get("field"),
             "page": page_num,
@@ -135,8 +144,53 @@ def _build_evidencia(
             "fuente_texto": "ocr" if is_ocr else "pdf_text",
             "id_ocr": page_obj.id_ocr if is_ocr else None,
             "confianza_ocr": page_obj.confianza_ocr_promedio if is_ocr else None,
+            "bboxes": bboxes,
         })
     return evidencia
+
+
+def _bboxes_for_span(
+    cs_global: int | None,
+    ce_global: int | None,
+    page_num: int | None,
+    page_obj,
+    page_global_start: dict[int, int],
+) -> list[list[float]] | None:
+    """Encuentra las bboxes (en PT) de las lineas OCR que cubren un span.
+
+    Convierte el span global del texto ensamblado a coordenadas locales
+    de la pagina, despues itera las lineas buscando overlap. Una entity
+    puede partirse en varias lineas (ej. nombre largo a 2 renglones); por
+    eso devuelve lista.
+
+    Devuelve None si:
+    - El span carece de offsets validos
+    - La pagina no esta en page_obj o page_obj.lines es vacio
+    - Ninguna linea overlapea (caso raro, posible si langextract apunta a
+      whitespace entre lineas)
+    """
+    if cs_global is None or ce_global is None or page_num is None:
+        return None
+    if not page_obj or not page_obj.lines:
+        return None
+    page_start_global = page_global_start.get(page_num)
+    if page_start_global is None:
+        return None
+    cs_local = cs_global - page_start_global
+    ce_local = ce_global - page_start_global
+    if ce_local <= 0 or cs_local >= len(page_obj.text):
+        return None
+    bboxes: list[list[float]] = []
+    for line in page_obj.lines:
+        bbox = line.get("bbox")
+        line_cs = line.get("char_start")
+        line_ce = line.get("char_end")
+        if bbox is None or line_cs is None or line_ce is None:
+            continue
+        # Overlap estricto. Esto evita matchear lineas vacias o whitespace.
+        if line_cs < ce_local and line_ce > cs_local:
+            bboxes.append(list(bbox))
+    return bboxes or None
 
 
 @app.post("/extract")
@@ -214,8 +268,10 @@ async def _load_pages_from_ocr(
     """Path 'ocr': descarga el .md del bucket OCR y reconstruye PageContent[]
     usando los offsets que persistió ocr-api en dt_ocr_pagina.
 
-    Cada PageContent queda con source='ocr' + id_ocr (FK a dt_ocr_pagina) →
-    el evidence-builder etiqueta uniformemente toda la evidencia como OCR.
+    Cada PageContent queda con source='ocr' + id_ocr (FK a dt_ocr_pagina) +
+    `lines` (con bbox en PT y char_start/char_end locales) → el
+    evidence-builder etiqueta la evidencia como OCR y calcula bboxes por
+    overlap span↔linea.
     """
     if not storage_client:
         raise RuntimeError("GCS no inicializado para descargar OCR markdown")
@@ -237,6 +293,11 @@ async def _load_pages_from_ocr(
             id_ocr=meta["id_ocr_pagina"],
             confianza_ocr_promedio=float(meta["confianza_promedio"])
                 if meta.get("confianza_promedio") is not None else None,
+            # lines viene como JSONB de Postgres → list[dict] en Python.
+            # Cada item tiene char_start/char_end relativos al texto de la
+            # pagina (NO al markdown completo) — ojo no confundir cuando
+            # esto se cruza con offsets globales.
+            lines=meta.get("lines"),
         ))
     return pages
 
