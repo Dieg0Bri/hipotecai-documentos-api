@@ -236,7 +236,15 @@ class CloudSQLHandler:
 
     async def _load_blob(self, session, id_extraccion: int) -> tuple[dict, int, int] | None:
         """Lee el blob de una extracción. Devuelve (blob, id_archivo, id_tenant).
-        Devuelve None si la extracción no existe."""
+        Devuelve None si la extracción no existe.
+
+        Parse defensivo: SQLAlchemy+asyncpg suele decodificar JSONB a dict
+        Python automáticamente (lo confirma el comportamiento de
+        `dt_ocr_pagina.lines` en el resto del repo). Pero en ciertos paths
+        (text() crudo, conexiones sin codec registrado) puede llegar como
+        str. Manejamos ambos casos.
+        """
+        import json
         res = await session.execute(
             text(
                 """
@@ -249,7 +257,17 @@ class CloudSQLHandler:
         row = res.mappings().first()
         if not row:
             return None
-        blob = row["anchors"] or self._empty_blob()
+        raw = row["anchors"]
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                raw = None
+        blob = raw or self._empty_blob()
+        # Garantizar que la key 'anchors' existe — si el blob viejo solo
+        # tiene 'version' o está corrupto, normalizamos a la forma canónica.
+        if "anchors" not in blob or not isinstance(blob.get("anchors"), list):
+            blob = {**blob, "anchors": []}
         return blob, row["id_archivo"], row["id_tenant"]
 
     async def _save_blob(self, session, id_extraccion: int, blob: dict) -> None:
@@ -354,6 +372,10 @@ class CloudSQLHandler:
             out: list[dict] = []
             for a in sorted(anchors, key=self._sort_key):
                 enriched = self._enrich_anchor_with_ocr(a, ocr_map)
+                # Skip anchors corruptos sin id — no podemos exponerlos
+                # porque el frontend los necesita como key para CRUD.
+                if not enriched.get("id"):
+                    continue
                 # Conservar nombres legacy que el frontend ya consume.
                 enriched["id_evidencia"] = enriched["id"]  # alias para compat
                 enriched["id_extraccion"] = id_extraccion
@@ -462,19 +484,17 @@ class CloudSQLHandler:
         """Patch parcial sobre un anchor del blob. Solo los campos provistos
         se modifican; el resto permanece intacto.
 
-        `estado='rechazado'` se permite por compat con el cliente actual,
-        pero en el modelo 011 ya no existe — el frontend debería llamar a
-        DELETE en su lugar. Si llega 'rechazado', lo tratamos como delete.
+        El estado 'rechazado' ya no se permite — el endpoint PATCH lo
+        intercepta antes y lo redirige a DELETE. Si llega aquí, raise.
         """
         from datetime import datetime, timezone
         if not self.engine:
             return None
-        if estado is not None and estado not in ("propuesto", "confirmado", "rechazado"):
-            raise ValueError(f"estado inválido: {estado}")
-        # Rechazado se interpreta como delete (consistencia con el nuevo modelo).
-        if estado == "rechazado":
-            await self.delete_anchor(id_anchor)
-            return None
+        if estado is not None and estado not in ("propuesto", "confirmado"):
+            raise ValueError(
+                f"estado inválido: {estado}. 'rechazado' no se admite via update — "
+                "usá DELETE o POST /anchors/{id}/rechazar."
+            )
         async with self.session_factory() as session:
             id_extraccion = await self._find_anchor_extraction(session, id_anchor)
             if id_extraccion is None:

@@ -359,9 +359,19 @@ async def update_anchor(id_anchor: str, req: UpdateAnchorRequest):
     Para mover el anchor a otro span, pasar campos `page` + `char_start` +
     `char_end` (pdf_text) o `bboxes` (ocr). Para cambiar el estado, pasar
     `estado` — la UI normalmente usa esto para Confirmar/Rechazar.
+
+    Compat: a partir de la migración 011, rechazar es hard-delete. Si el
+    cliente manda `estado='rechazado'`, redirigimos a delete y devolvemos
+    el shape de DeleteAnchorResult (`{id_anchor, action: 'deleted'}`) para
+    que el cliente sepa que el recurso ya no existe.
     """
     if not db:
         return error_response("DB no inicializada", code="NOT_READY", status_code=503)
+    if req.estado == "rechazado":
+        action = await db.delete_anchor(id_anchor)
+        if action is None:
+            return error_response("Anchor no existe", code="NOT_FOUND", status_code=404)
+        return success_response(data={"id_anchor": id_anchor, "action": action})
     try:
         anchor = await db.update_anchor(
             id_anchor,
