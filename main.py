@@ -233,8 +233,9 @@ async def get_ocr_transcript(id_archivo: int, modelo: str | None = None):
 
     **Importante**: el OCR NUNCA reemplaza al documento — vive como
     artefacto separado en su propio bucket. Este endpoint expone esa
-    separación: el caller obtiene la URI al markdown y lo descarga
-    directamente vía signed URL (`ocr-api/ocr-document-url`).
+    separación: el caller obtiene la URI al markdown y la firma vía
+    `ingestion-service/api-ingestion/upload/ocr-download-url` (mismo
+    servicio que firma el PDF original, mismo tenant scoping).
     """
     if not db:
         return error_response("DB no inicializada", code="NOT_READY", status_code=503)

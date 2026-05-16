@@ -4,11 +4,19 @@ Servicio Python/FastAPI que extrae **datos estructurados específicos por tipo d
 
 ## Endpoints
 
-| Método | Ruta                  | Descripción |
-|--------|-----------------------|-------------|
-| GET    | `/health`             | Health |
-| POST   | `/extract`            | Extracción dado el texto plano + tipo |
-| POST   | `/extract-from-gcs`   | Descarga del bucket → extrae texto → extrae campos → persiste en `dt_extraccion` |
+| Método | Ruta                                       | Descripción |
+|--------|--------------------------------------------|-------------|
+| GET    | `/health`                                  | Health |
+| POST   | `/extract`                                 | Extracción dado el texto plano + tipo |
+| POST   | `/extract-from-gcs`                        | Descarga del bucket → extrae texto → extrae campos → persiste en `dt_extraccion` |
+| GET    | `/archivos/{id_archivo}/ocr`               | Metadata del .md OCR (gcs_uri, offsets por página, bbox/conf por línea) |
+| GET/POST/PATCH/DELETE | `/anchors/...`                | CRUD de anchors (evidencia navegable, migración 010) |
+
+La **firma del `.md` OCR** para descargarlo en el visor NO vive acá — la
+hace `ingestion-service` junto con la del PDF original, en
+`/api-ingestion/upload/ocr-download-url`. Razón: tenant scoping y manejo
+de archivos están centralizados ahí; documentos-api solo expone la
+metadata del OCR (offsets, bbox, confidence) y la lógica de extracción.
 
 ## Extractors disponibles
 

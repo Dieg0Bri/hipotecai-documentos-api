@@ -124,8 +124,10 @@ class CloudSQLHandler:
         """Devuelve el último documento OCR (URI al .md + metadata global).
 
         El TEXTO completo NO está en la BBDD — vive como markdown en GCS.
-        El frontend pide gcs_uri y luego ocr-api/ocr-document-url para
-        firmar el link de descarga.
+        El frontend pide gcs_uri y luego ingestion-service firma el link
+        de descarga (mismo servicio que ya firma el PDF original, con el
+        mismo patrón de tenant scoping). La firma vive ahí y NO en ocr-api
+        (GPU) para no despertar la L4 cuando alguien abre el visor.
         """
         if not self.engine:
             return None
