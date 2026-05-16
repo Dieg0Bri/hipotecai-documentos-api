@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from google.cloud import storage
 
@@ -25,7 +25,12 @@ from src.database.cloudsql_handler import CloudSQLHandler  # noqa: E402
 from src.extractors import get_extractor  # noqa: E402
 from src.middleware.analytics import AnalyticsMiddleware  # noqa: E402
 from src.middleware.oauth import GoogleOAuthMiddleware  # noqa: E402
-from src.models.schemas import ExtractFromGCSRequest, ExtractRequest  # noqa: E402
+from src.models.schemas import (  # noqa: E402
+    CreateAnchorRequest,
+    ExtractFromGCSRequest,
+    ExtractRequest,
+    UpdateAnchorRequest,
+)
 from src.services.text_extractor import (  # noqa: E402
     PageContent,
     assemble_text_and_offsets,
@@ -249,11 +254,169 @@ async def get_evidencia_extraccion(id_extraccion: int):
     """Lista cada campo extraído con su evidencia (página, span, snippet) y
     fuente_texto (`pdf_text` vs `ocr`). Permite que la UI pinte un badge
     "vía OCR" en los campos que dependen de transcripción de modelo.
+
+    Alias retrocompat de `/extracciones/{id}/anchors`. Devuelve el mismo
+    shape, incluyendo los campos nuevos `origen` y `estado` (migración 010).
     """
     if not db:
         return error_response("DB no inicializada", code="NOT_READY", status_code=503)
-    items = await db.get_evidencia(id_extraccion)
+    items = await db.list_anchors(id_extraccion)
     return success_response(data={"id_extraccion": id_extraccion, "evidencia": items})
+
+
+# ─────────────────── CRUD de anchors (migración 010) ───────────────────
+# Los anchors son la trazabilidad navegable entre un campo extraído y su
+# ubicación en el documento. El extractor crea anchors `auto` y el abogado
+# puede agregar/editar/borrar/confirmar/rechazar sobre ellos en el visor.
+#
+# Convenciones REST:
+#   - El recurso colección vive bajo /extracciones/{id_extraccion}/anchors
+#     porque crear un anchor sin contexto de extracción no tiene sentido.
+#   - El recurso individual vive bajo /anchors/{id_anchor} (sin nested)
+#     porque ahí ya conocemos su id_extraccion vía la PK y queremos URLs
+#     cortas para PATCH/DELETE.
+#   - DELETE de un anchor 'auto' hace soft (estado='rechazado') por
+#     auditoría; DELETE de un 'manual' hace hard. Ver delete_anchor().
+
+def _creador_actual(request) -> str:
+    """Identifica al autor del cambio. Usa el email del JWT si está; cae
+    a 'sistema' cuando se llama sin auth (modo dev / health probes)."""
+    try:
+        user = getattr(request.state, "user", None)
+        if user and user.get("email"):
+            return user["email"]
+    except Exception:  # noqa: BLE001
+        pass
+    return "sistema"
+
+
+@app.get("/extracciones/{id_extraccion}/anchors")
+async def list_anchors(id_extraccion: int, include_rejected: bool = True):
+    """Lista todos los anchors de una extracción.
+
+    Por default incluye los rechazados — el frontend filtra según si está
+    en modo "ver activos" o "ver auditoría". Para listar solo lo visible
+    al abogado por default, pasar `?include_rejected=false`.
+    """
+    if not db:
+        return error_response("DB no inicializada", code="NOT_READY", status_code=503)
+    items = await db.list_anchors(id_extraccion, include_rejected=include_rejected)
+    return success_response(data={"id_extraccion": id_extraccion, "anchors": items})
+
+
+@app.post("/extracciones/{id_extraccion}/anchors", status_code=201)
+async def create_anchor(id_extraccion: int, req: CreateAnchorRequest, request: Request):
+    """Crea un anchor MANUAL. Nace con estado='confirmado' porque la acción
+    de crearlo a mano implica que el abogado ya validó la ubicación.
+
+    Valida coherencia mínima: si `fuente_texto='ocr'` debe traer bboxes;
+    si `'pdf_text'` debe traer char_start/char_end.
+    """
+    if not db:
+        return error_response("DB no inicializada", code="NOT_READY", status_code=503)
+    if req.fuente_texto == "ocr" and not req.bboxes:
+        return error_response(
+            "fuente_texto='ocr' requiere bboxes (lista de [x0,y0,x1,y1] en puntos PDF).",
+            code="MISSING_BBOXES", status_code=422,
+        )
+    if req.fuente_texto == "pdf_text" and (
+        req.char_start is None or req.char_end is None
+    ):
+        return error_response(
+            "fuente_texto='pdf_text' requiere char_start y char_end.",
+            code="MISSING_CHAR_RANGE", status_code=422,
+        )
+    try:
+        anchor = await db.create_anchor(
+            id_extraccion=id_extraccion,
+            campo=req.campo,
+            page=req.page,
+            char_start=req.char_start,
+            char_end=req.char_end,
+            snippet=req.snippet,
+            fuente_texto=req.fuente_texto,
+            bboxes=req.bboxes,
+            id_ocr=req.id_ocr,
+            creado_por=_creador_actual(request),
+        )
+        return success_response(data=anchor, message="Anchor creado.")
+    except ValueError as exc:
+        return error_response(str(exc), code="INVALID_INPUT", status_code=400)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("create_anchor")
+        return error_response(str(exc), code="CREATE_FAILED")
+
+
+@app.patch("/anchors/{id_anchor}")
+async def update_anchor(id_anchor: int, req: UpdateAnchorRequest):
+    """Edita un anchor existente. Cualquier campo no provisto se preserva.
+
+    Para mover el anchor a otro span, pasar campos `page` + `char_start` +
+    `char_end` (pdf_text) o `bboxes` (ocr). Para cambiar el estado, pasar
+    `estado` — la UI normalmente usa esto para Confirmar/Rechazar.
+    """
+    if not db:
+        return error_response("DB no inicializada", code="NOT_READY", status_code=503)
+    try:
+        anchor = await db.update_anchor(
+            id_anchor,
+            campo=req.campo,
+            snippet=req.snippet,
+            estado=req.estado,
+            page=req.page,
+            char_start=req.char_start,
+            char_end=req.char_end,
+            bboxes=req.bboxes,
+            # clear_bboxes y bboxes son mutuamente excluyentes en sentido
+            # semántico; pasamos bboxes_set=True si el cliente envió
+            # `clear_bboxes=true` o si envió un array explícito.
+            bboxes_set=req.clear_bboxes or req.bboxes is not None,
+        )
+        if not anchor:
+            return error_response("Anchor no existe", code="NOT_FOUND", status_code=404)
+        return success_response(data=anchor)
+    except ValueError as exc:
+        return error_response(str(exc), code="INVALID_INPUT", status_code=400)
+
+
+@app.delete("/anchors/{id_anchor}")
+async def delete_anchor(id_anchor: int):
+    """Borra un anchor.
+
+    - origen='manual' → DELETE físico (el usuario es dueño de su anchor).
+    - origen='auto'   → estado='rechazado' (preservamos auditoría).
+    """
+    if not db:
+        return error_response("DB no inicializada", code="NOT_READY", status_code=503)
+    action = await db.delete_anchor(id_anchor)
+    if action is None:
+        return error_response("Anchor no existe", code="NOT_FOUND", status_code=404)
+    return success_response(data={"id_anchor": id_anchor, "action": action})
+
+
+@app.post("/anchors/{id_anchor}/confirmar")
+async def confirmar_anchor(id_anchor: int):
+    """Shortcut de PATCH estado='confirmado'. La UI lo llama desde el botón
+    'Aprobar' del panel de entidades."""
+    if not db:
+        return error_response("DB no inicializada", code="NOT_READY", status_code=503)
+    anchor = await db.update_anchor(id_anchor, estado="confirmado")
+    if not anchor:
+        return error_response("Anchor no existe", code="NOT_FOUND", status_code=404)
+    return success_response(data=anchor)
+
+
+@app.post("/anchors/{id_anchor}/rechazar")
+async def rechazar_anchor(id_anchor: int):
+    """Shortcut de PATCH estado='rechazado'. Equivalente a DELETE para un
+    anchor 'auto' — la UI usa este endpoint cuando el botón es 'Rechazar'
+    (semántica: 'el modelo se equivocó'), DELETE cuando es 'Borrar'."""
+    if not db:
+        return error_response("DB no inicializada", code="NOT_READY", status_code=503)
+    anchor = await db.update_anchor(id_anchor, estado="rechazado")
+    if not anchor:
+        return error_response("Anchor no existe", code="NOT_FOUND", status_code=404)
+    return success_response(data=anchor)
 
 
 async def _load_pages_from_pdf(content: bytes, blob_content_type: str, gcs_path: str) -> list[PageContent]:

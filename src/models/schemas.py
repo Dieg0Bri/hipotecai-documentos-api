@@ -485,3 +485,54 @@ class ExtractionResult(BaseModel):
     confianza: float = 0.0
     spans: list[dict] = []
     schema_version: str = "v1"  # bump por el cambio de spec
+
+
+# ─────────── Anchors (trazabilidad campo↔documento) ───────────
+# Los anchors permiten al abogado AGREGAR/EDITAR/BORRAR la conexión entre
+# un campo extraído y el span del PDF que lo respalda. La evidencia
+# auto-generada por el extractor también es un anchor (origen='auto').
+
+class CreateAnchorRequest(BaseModel):
+    """Crea un anchor manual sobre una extracción existente.
+
+    El usuario debe entregar al menos `campo` y una ubicación válida —
+    page+char_start+char_end (pdf_text) o page+bboxes (ocr). El backend
+    no verifica que las coordenadas estén dentro del documento; eso es
+    responsabilidad de la UI que las genera vía window.getSelection o
+    dibujando rects sobre el canvas.
+    """
+    model_config = ConfigDict(extra="forbid")
+    campo: str = Field(..., min_length=1, description="Path del campo: 'titular.rut'")
+    page: int | None = None
+    char_start: int | None = None
+    char_end: int | None = None
+    snippet: str | None = None
+    fuente_texto: Literal["pdf_text", "ocr"] = "pdf_text"
+    bboxes: list[list[float]] | None = Field(
+        None,
+        description="Array de [x0,y0,x1,y1] en PUNTOS PDF; obligatorio si fuente='ocr'",
+    )
+    id_ocr: int | None = Field(
+        None,
+        description="FK a dt_ocr_pagina cuando fuente='ocr'; permite trazar al OCR exacto.",
+    )
+
+
+class UpdateAnchorRequest(BaseModel):
+    """Patch parcial. Solo los campos provistos se modifican."""
+    model_config = ConfigDict(extra="forbid")
+    campo: str | None = None
+    snippet: str | None = None
+    estado: Literal["propuesto", "confirmado", "rechazado"] | None = None
+    page: int | None = None
+    char_start: int | None = None
+    char_end: int | None = None
+    # `bboxes` aquí tiene tres estados: ausente (no cambiar), [] / None
+    # (poner a NULL), array (reemplazar). Pydantic no distingue ausente vs
+    # None — usamos el `bboxes_set` interno en el handler. Para que el
+    # usuario pueda mandar null y limpiar, exponemos un campo separado.
+    bboxes: list[list[float]] | None = None
+    clear_bboxes: bool = Field(
+        False,
+        description="True para poner bboxes a NULL (al cambiar de OCR a pdf_text).",
+    )
