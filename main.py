@@ -353,7 +353,7 @@ async def create_anchor(id_extraccion: int, req: CreateAnchorRequest, request: R
 
 
 @app.patch("/anchors/{id_anchor}")
-async def update_anchor(id_anchor: int, req: UpdateAnchorRequest):
+async def update_anchor(id_anchor: str, req: UpdateAnchorRequest):
     """Edita un anchor existente. Cualquier campo no provisto se preserva.
 
     Para mover el anchor a otro span, pasar campos `page` + `char_start` +
@@ -385,11 +385,12 @@ async def update_anchor(id_anchor: int, req: UpdateAnchorRequest):
 
 
 @app.delete("/anchors/{id_anchor}")
-async def delete_anchor(id_anchor: int):
-    """Borra un anchor.
+async def delete_anchor(id_anchor: str):
+    """Hard delete: remueve el anchor del blob de la extracción.
 
-    - origen='manual' → DELETE físico (el usuario es dueño de su anchor).
-    - origen='auto'   → estado='rechazado' (preservamos auditoría).
+    A partir de la migración 011 no hay soft-delete — origen 'auto' o
+    'manual', ambos se borran físicamente. Si el extractor vuelve a
+    proponer un anchor borrado en un reproceso, reaparece con nuevo UUID.
     """
     if not db:
         return error_response("DB no inicializada", code="NOT_READY", status_code=503)
@@ -400,7 +401,7 @@ async def delete_anchor(id_anchor: int):
 
 
 @app.post("/anchors/{id_anchor}/confirmar")
-async def confirmar_anchor(id_anchor: int):
+async def confirmar_anchor(id_anchor: str):
     """Shortcut de PATCH estado='confirmado'. La UI lo llama desde el botón
     'Aprobar' del panel de entidades."""
     if not db:
@@ -412,16 +413,17 @@ async def confirmar_anchor(id_anchor: int):
 
 
 @app.post("/anchors/{id_anchor}/rechazar")
-async def rechazar_anchor(id_anchor: int):
-    """Shortcut de PATCH estado='rechazado'. Equivalente a DELETE para un
-    anchor 'auto' — la UI usa este endpoint cuando el botón es 'Rechazar'
-    (semántica: 'el modelo se equivocó'), DELETE cuando es 'Borrar'."""
+async def rechazar_anchor(id_anchor: str):
+    """Rechazar = borrar el anchor (modelo 011 no tiene soft-delete).
+    Se mantiene el endpoint por compat: el cliente puede seguir llamando
+    /rechazar pero el efecto es idéntico a DELETE.
+    """
     if not db:
         return error_response("DB no inicializada", code="NOT_READY", status_code=503)
-    anchor = await db.update_anchor(id_anchor, estado="rechazado")
-    if not anchor:
+    action = await db.delete_anchor(id_anchor)
+    if action is None:
         return error_response("Anchor no existe", code="NOT_FOUND", status_code=404)
-    return success_response(data=anchor)
+    return success_response(data={"id_anchor": id_anchor, "action": action})
 
 
 async def _load_pages_from_pdf(content: bytes, blob_content_type: str, gcs_path: str) -> list[PageContent]:
