@@ -97,13 +97,21 @@ class BaseExtractor(ABC):
         spans: list[dict] = []
         for ex in extractions:
             interval = getattr(ex, "char_interval", None)
-            if interval:
-                spans.append({
-                    "field": getattr(ex, "extraction_class", None),
-                    "value": getattr(ex, "extraction_text", None),
-                    "start_char": getattr(interval, "start_pos", None),
-                    "end_char": getattr(interval, "end_pos", None),
-                })
+            # langextract puede devolver CharInterval con start_pos/end_pos = None
+            # cuando no localizó el span en el texto. Sin offsets validos no
+            # podemos resolver bboxes ni pintar highlights — descartamos el span.
+            if not interval:
+                continue
+            start_pos = getattr(interval, "start_pos", None)
+            end_pos = getattr(interval, "end_pos", None)
+            if start_pos is None or end_pos is None:
+                continue
+            spans.append({
+                "field": getattr(ex, "extraction_class", None),
+                "value": getattr(ex, "extraction_text", None),
+                "start_char": start_pos,
+                "end_char": end_pos,
+            })
 
         confianza = self._estimate_confidence(datos)
         return ExtractionResult(tipo=self.tipo, datos=datos, confianza=confianza, spans=spans)
