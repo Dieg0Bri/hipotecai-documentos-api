@@ -10,6 +10,12 @@ from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Etiqueta que queda en dt_extraccion_evidencia.creado_por para los anchors
+# auto-generados por el extractor. Si cambia el extractor (nuevo modelo,
+# prompt o versión de langextract), bumpear este valor permite auditar qué
+# corrida los creó.
+EXTRACTION_PIPELINE_VERSION_TAG = "v1"
+
 
 class CloudSQLHandler:
     def __init__(self):
@@ -94,29 +100,41 @@ class CloudSQLHandler:
             id_extraccion = row[0] if row else None
             id_tenant = row[1] if row else None
 
-            # Reemplazar evidencia anterior cuando re-procesamos:
-            # un sha distinto invalida cualquier evidencia previa.
+            # Re-procesar invalida la evidencia AUTO previa pero respeta los
+            # anchors MANUALES que dibujó el abogado. El abogado mantiene su
+            # trabajo aunque cambie el extractor; un mismatch de sha tampoco
+            # debe borrar lo que él/ella ancló a mano (queda visible y la UI
+            # puede marcar "sha cambió" si fuera necesario).
             if id_extraccion and evidencia is not None:
                 await session.execute(
-                    text("DELETE FROM dt_extraccion_evidencia WHERE id_extraccion = :id"),
+                    text(
+                        "DELETE FROM dt_extraccion_evidencia "
+                        "WHERE id_extraccion = :id AND origen = 'auto'"
+                    ),
                     {"id": id_extraccion},
                 )
                 if evidencia and sha256_documento:
+                    # Migración 010 — cada evidencia generada por el extractor
+                    # nace como anchor auto/propuesto. El abogado después la
+                    # confirma o rechaza vía PATCH /anchors/{id}.
                     ins_ev = text(
                         """
                         INSERT INTO dt_extraccion_evidencia (
                             id_tenant, id_extraccion, id_archivo, campo, page,
                             char_start, char_end, snippet, sha256_documento, confianza,
-                            fuente_texto, id_ocr, confianza_ocr, bboxes
+                            fuente_texto, id_ocr, confianza_ocr, bboxes,
+                            origen, estado, creado_por, fecha_actualizacion
                         )
                         VALUES (
                             :id_tenant, :id_extraccion, :id_archivo, :campo, :page,
                             :char_start, :char_end, :snippet, :sha, :confianza,
                             :fuente_texto, :id_ocr, :confianza_ocr,
-                            CAST(:bboxes AS JSONB)
+                            CAST(:bboxes AS JSONB),
+                            'auto', 'propuesto', :creado_por, NOW()
                         )
                         """
                     )
+                    creado_por = f"extractor:{EXTRACTION_PIPELINE_VERSION_TAG}"
                     for ev in evidencia:
                         bboxes = ev.get("bboxes")
                         await session.execute(ins_ev, {
@@ -134,6 +152,7 @@ class CloudSQLHandler:
                             "id_ocr": ev.get("id_ocr"),
                             "confianza_ocr": ev.get("confianza_ocr"),
                             "bboxes": json.dumps(bboxes) if bboxes else None,
+                            "creado_por": creado_por,
                         })
 
             await session.execute(
@@ -191,35 +210,247 @@ class CloudSQLHandler:
             )
             return [dict(r) for r in res.mappings().all()]
 
+    # SQL base que reusan list_anchors / get_anchor / get_evidencia.
+    # Mantiene join con OCR para que el frontend pueda enlazar al .md.
+    _ANCHOR_SELECT_SQL = """
+        SELECT e.id_evidencia, e.id_extraccion, e.id_archivo,
+               e.campo, e.page, e.char_start, e.char_end,
+               e.snippet, e.sha256_documento, e.confianza,
+               e.fuente_texto, e.id_ocr, e.confianza_ocr, e.bboxes,
+               e.origen, e.estado, e.creado_por,
+               e.fecha AS fecha_creacion, e.fecha_actualizacion,
+               op.id_ocr_documento, doc.modelo AS ocr_modelo,
+               doc.gcs_uri AS ocr_md_uri,
+               op.char_start AS ocr_pagina_char_start,
+               op.char_end   AS ocr_pagina_char_end
+        FROM dt_extraccion_evidencia e
+        LEFT JOIN dt_ocr_pagina op  ON op.id_ocr_pagina    = e.id_ocr
+        LEFT JOIN dt_ocr_documento doc ON doc.id_ocr_documento = op.id_ocr_documento
+    """
+
     async def get_evidencia(self, id_extraccion: int) -> list[dict]:
         """Devuelve evidencia de una extracción con la procedencia (pdf_text/ocr)
         para que el frontend muestre el badge correcto en cada campo. Cuando
         la evidencia es OCR, también devuelve gcs_uri al .md para enlazar.
+
+        Alias retrocompatible de `list_anchors()`. Se mantiene porque hay
+        callers (frontend pre-010) que llaman a /extracciones/{id}/evidencia.
+        """
+        return await self.list_anchors(id_extraccion)
+
+    async def list_anchors(
+        self,
+        id_extraccion: int,
+        *,
+        include_rejected: bool = True,
+    ) -> list[dict]:
+        """Anchors de una extracción (auto + manual). Por default incluye los
+        rechazados — el frontend decide si los oculta. Cuando se llama desde
+        el visor en modo "ver activos" pasar `include_rejected=False`.
         """
         if not self.engine:
             return []
+        sql = self._ANCHOR_SELECT_SQL + " WHERE e.id_extraccion = :id_extraccion"
+        if not include_rejected:
+            sql += " AND e.estado != 'rechazado'"
+        sql += " ORDER BY e.page NULLS LAST, e.char_start NULLS LAST, e.id_evidencia"
         async with self.session_factory() as session:
-            res = await session.execute(
+            res = await session.execute(text(sql), {"id_extraccion": id_extraccion})
+            return [dict(r) for r in res.mappings().all()]
+
+    async def get_anchor(self, id_anchor: int) -> dict | None:
+        if not self.engine:
+            return None
+        sql = self._ANCHOR_SELECT_SQL + " WHERE e.id_evidencia = :id"
+        async with self.session_factory() as session:
+            res = await session.execute(text(sql), {"id": id_anchor})
+            row = res.mappings().first()
+            return dict(row) if row else None
+
+    async def create_anchor(
+        self,
+        *,
+        id_extraccion: int,
+        campo: str,
+        page: int | None,
+        char_start: int | None,
+        char_end: int | None,
+        snippet: str | None,
+        fuente_texto: str,
+        bboxes: list[list[float]] | None,
+        id_ocr: int | None,
+        creado_por: str,
+    ) -> dict:
+        """Crea un anchor MANUAL ligado a una extracción existente.
+
+        Carga el sha256 actual del archivo desde dt_archivos — el anchor
+        queda atado al estado actual del documento. Si después se reprocesa
+        el archivo con un PDF distinto, este anchor seguirá apuntando al
+        sha viejo (la UI puede detectarlo comparando con `dt_archivos.sha256`
+        y marcar "evidencia stale").
+
+        Devuelve el row completo con id_anchor y campos derivados (join OCR).
+        """
+        import json
+        if not self.engine:
+            raise RuntimeError("DB no inicializada")
+        async with self.session_factory() as session:
+            ctx = await session.execute(
                 text(
                     """
-                    SELECT e.id_evidencia, e.campo, e.page, e.char_start, e.char_end,
-                           e.snippet, e.sha256_documento, e.confianza,
-                           e.fuente_texto, e.id_ocr, e.confianza_ocr, e.bboxes,
-                           op.id_ocr_documento, doc.modelo AS ocr_modelo,
-                           doc.gcs_uri AS ocr_md_uri,
-                           op.char_start AS ocr_pagina_char_start,
-                           op.char_end   AS ocr_pagina_char_end
-                    FROM dt_extraccion_evidencia e
-                    LEFT JOIN dt_ocr_pagina op  ON op.id_ocr_pagina    = e.id_ocr
-                    LEFT JOIN dt_ocr_documento doc ON doc.id_ocr_documento = op.id_ocr_documento
-                    WHERE e.id_extraccion = :id_extraccion
-                    ORDER BY e.page NULLS LAST, e.char_start NULLS LAST
+                    SELECT x.id_tenant, x.id_archivo, a.sha256
+                    FROM dt_extraccion x
+                    JOIN dt_archivos a ON a.id_archivo = x.id_archivo
+                    WHERE x.id_extraccion = :id
                     """
                 ),
-                {"id_extraccion": id_extraccion},
+                {"id": id_extraccion},
             )
-            rows = res.mappings().all()
-            return [dict(row) for row in rows]
+            ctx_row = ctx.first()
+            if not ctx_row:
+                raise ValueError(f"Extracción {id_extraccion} no existe")
+            id_tenant, id_archivo, sha256_doc = ctx_row
+
+            ins = await session.execute(
+                text(
+                    """
+                    INSERT INTO dt_extraccion_evidencia (
+                        id_tenant, id_extraccion, id_archivo, campo, page,
+                        char_start, char_end, snippet, sha256_documento,
+                        fuente_texto, id_ocr, bboxes,
+                        origen, estado, creado_por, fecha_actualizacion
+                    )
+                    VALUES (
+                        :id_tenant, :id_extraccion, :id_archivo, :campo, :page,
+                        :char_start, :char_end, :snippet, :sha,
+                        :fuente_texto, :id_ocr, CAST(:bboxes AS JSONB),
+                        'manual', 'confirmado', :creado_por, NOW()
+                    )
+                    RETURNING id_evidencia
+                    """
+                ),
+                {
+                    "id_tenant": id_tenant,
+                    "id_extraccion": id_extraccion,
+                    "id_archivo": id_archivo,
+                    "campo": campo,
+                    "page": page,
+                    "char_start": char_start,
+                    "char_end": char_end,
+                    "snippet": (snippet or "")[:500] or None,
+                    "sha": sha256_doc,
+                    "fuente_texto": fuente_texto,
+                    "id_ocr": id_ocr,
+                    "bboxes": json.dumps(bboxes) if bboxes else None,
+                    "creado_por": creado_por,
+                },
+            )
+            id_anchor = ins.scalar_one()
+            await session.commit()
+        # Re-lee con join OCR para devolver el shape canónico.
+        return await self.get_anchor(id_anchor) or {}
+
+    async def update_anchor(
+        self,
+        id_anchor: int,
+        *,
+        campo: str | None = None,
+        snippet: str | None = None,
+        estado: str | None = None,
+        page: int | None = None,
+        char_start: int | None = None,
+        char_end: int | None = None,
+        bboxes: list[list[float]] | None = None,
+        bboxes_set: bool = False,
+    ) -> dict | None:
+        """Patch parcial. Solo los campos provistos se modifican.
+
+        `bboxes_set` distingue "no me lo pases" de "borralo a NULL" — para los
+        otros campos los pasamos como None y los ignoramos en el COALESCE.
+        Para bboxes necesitamos el flag porque NULL es un valor legítimo (caso:
+        anchor cambió de OCR a pdf_text).
+        """
+        import json
+        if not self.engine:
+            return None
+        sets: list[str] = []
+        params: dict = {"id": id_anchor}
+        if campo is not None:
+            sets.append("campo = :campo")
+            params["campo"] = campo
+        if snippet is not None:
+            sets.append("snippet = :snippet")
+            params["snippet"] = snippet[:500] or None
+        if estado is not None:
+            if estado not in ("propuesto", "confirmado", "rechazado"):
+                raise ValueError(f"estado inválido: {estado}")
+            sets.append("estado = :estado")
+            params["estado"] = estado
+        if page is not None:
+            sets.append("page = :page")
+            params["page"] = page
+        if char_start is not None:
+            sets.append("char_start = :char_start")
+            params["char_start"] = char_start
+        if char_end is not None:
+            sets.append("char_end = :char_end")
+            params["char_end"] = char_end
+        if bboxes_set:
+            sets.append("bboxes = CAST(:bboxes AS JSONB)")
+            params["bboxes"] = json.dumps(bboxes) if bboxes else None
+        if not sets:
+            return await self.get_anchor(id_anchor)
+        sets.append("fecha_actualizacion = NOW()")
+        sql = (
+            f"UPDATE dt_extraccion_evidencia SET {', '.join(sets)} "
+            f"WHERE id_evidencia = :id RETURNING id_evidencia"
+        )
+        async with self.session_factory() as session:
+            res = await session.execute(text(sql), params)
+            row = res.first()
+            if not row:
+                return None
+            await session.commit()
+        return await self.get_anchor(id_anchor)
+
+    async def delete_anchor(self, id_anchor: int) -> str | None:
+        """Borra o sof-borra un anchor.
+
+        - Si origen='manual': DELETE físico — fue trabajo del usuario, él decide.
+        - Si origen='auto': UPDATE estado='rechazado' — preservamos auditoría de
+          qué propuso el extractor.
+
+        Devuelve 'deleted' | 'rejected' | None (si no existe).
+        """
+        if not self.engine:
+            return None
+        async with self.session_factory() as session:
+            res = await session.execute(
+                text("SELECT origen FROM dt_extraccion_evidencia WHERE id_evidencia = :id"),
+                {"id": id_anchor},
+            )
+            row = res.first()
+            if not row:
+                return None
+            origen = row[0]
+            if origen == "manual":
+                await session.execute(
+                    text("DELETE FROM dt_extraccion_evidencia WHERE id_evidencia = :id"),
+                    {"id": id_anchor},
+                )
+                action = "deleted"
+            else:
+                await session.execute(
+                    text(
+                        "UPDATE dt_extraccion_evidencia "
+                        "SET estado = 'rechazado', fecha_actualizacion = NOW() "
+                        "WHERE id_evidencia = :id"
+                    ),
+                    {"id": id_anchor},
+                )
+                action = "rejected"
+            await session.commit()
+            return action
 
     async def get_archivo_sha256(self, id_archivo: int) -> str | None:
         """Lee el sha256 con el que el archivo quedó registrado en la ingesta."""
