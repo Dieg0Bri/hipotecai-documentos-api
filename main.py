@@ -314,17 +314,22 @@ async def create_anchor(id_extraccion: int, req: CreateAnchorRequest, request: R
     """
     if not db:
         return error_response("DB no inicializada", code="NOT_READY", status_code=503)
-    if req.fuente_texto == "ocr" and not req.bboxes:
+    # Page es obligatorio — sin él no podemos pintar el anchor en ningún lado.
+    if req.page is None:
         return error_response(
-            "fuente_texto='ocr' requiere bboxes (lista de [x0,y0,x1,y1] en puntos PDF).",
-            code="MISSING_BBOXES", status_code=422,
+            "page es obligatorio para crear un anchor.",
+            code="MISSING_PAGE", status_code=422,
         )
-    if req.fuente_texto == "pdf_text" and (
-        req.char_start is None or req.char_end is None
-    ):
+    # Ubicación: bboxes (preferido para anchors manuales del frontend, porque
+    # se calculan client-side via getClientRects/rect drawing) o char_start +
+    # char_end (legacy / extraction auto). Necesitamos al menos uno.
+    has_bboxes = bool(req.bboxes)
+    has_char_range = req.char_start is not None and req.char_end is not None
+    if not has_bboxes and not has_char_range:
         return error_response(
-            "fuente_texto='pdf_text' requiere char_start y char_end.",
-            code="MISSING_CHAR_RANGE", status_code=422,
+            "Anchor requiere bboxes o char_start+char_end. El frontend "
+            "típicamente envía bboxes desde la selección/dibujo.",
+            code="MISSING_LOCATION", status_code=422,
         )
     try:
         anchor = await db.create_anchor(
