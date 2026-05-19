@@ -122,6 +122,20 @@ def _build_evidencia(
     Para OCR adicionalmente resolvemos las bboxes de las lineas Surya que
     overlapean el span (en coords PDF). Esto permite al frontend dibujar
     el highlight directo sobre el canvas sin depender del text-layer.
+
+    **Convención de offsets persistidos** (`char_start/char_end`):
+      - `fuente_texto='ocr'`: LOCALES a la página (Sistema 3). El visor
+        descarga el .md OCR (con headers `## Página N` y disclaimer) y
+        lo slicea por bloque vía `dt_ocr_pagina.char_start/end`. Si
+        guardáramos los offsets que devuelve langextract — que son
+        globales al texto ensamblado SIN headers — el visor no podría
+        usarlos sin info adicional (el offset de cada página dentro del
+        ensamblado, que solo conocemos acá). Por eso convertimos a
+        locales antes de persistir: el frontend hace `text.slice(cs, ce)`
+        directo sobre el bloque de la página.
+      - `fuente_texto='pdf_text'`: globales del ensamblado, sin cambio.
+        El visor del PDF resalta vía text-layer match (string), no por
+        offsets, así que el sistema de coords no afecta highlights.
     """
     page_meta = {p.page: p for p in pages_local}
     # Indice page→global_start para mapear span_global a span_local_de_pagina.
@@ -137,14 +151,39 @@ def _build_evidencia(
         page_obj = page_meta.get(page_num) if page_num else None
 
         is_ocr = bool(page_obj and page_obj.source == "ocr")
+
+        # Para OCR convertimos los offsets a coords LOCALES de la pagina
+        # (ver docstring). Para pdf_text los dejamos globales — son
+        # opacos al visor del PDF (que usa text-layer match).
+        cs_persist = cs
+        ce_persist = ce
+        if (
+            is_ocr and cs is not None and ce is not None and page_num is not None
+        ):
+            page_start = page_global_start.get(page_num)
+            if page_start is not None:
+                cs_local = cs - page_start
+                ce_local = ce - page_start
+                page_len = len(page_obj.text) if page_obj else 0
+                # Sanity: descartamos offsets fuera del rango de la
+                # pagina (caso raro: span cross-page de langextract). El
+                # snippet y los bboxes se preservan, asi que el frontend
+                # todavia puede caer a snippet-match.
+                if 0 <= cs_local < page_len and ce_local > 0:
+                    cs_persist = cs_local
+                    ce_persist = min(ce_local, page_len)
+                else:
+                    cs_persist = None
+                    ce_persist = None
+
         bboxes = _bboxes_for_span(
             cs, ce, page_num, page_obj, page_global_start,
         ) if is_ocr else None
         evidencia.append({
             "campo": span.get("field"),
             "page": page_num,
-            "char_start": cs,
-            "char_end": ce,
+            "char_start": cs_persist,
+            "char_end": ce_persist,
             "snippet": snippet,
             "fuente_texto": "ocr" if is_ocr else "pdf_text",
             "id_ocr": page_obj.id_ocr if is_ocr else None,
