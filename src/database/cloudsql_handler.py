@@ -281,13 +281,19 @@ class CloudSQLHandler:
 
     async def _find_anchor_extraction(self, session, id_anchor: str) -> int | None:
         """Busca a qué id_extraccion pertenece un anchor por su UUID. Usa el
-        GIN index sobre anchors para evitar full scan."""
+        GIN index sobre anchors para evitar full scan.
+
+        Nota sobre el cast `:id::text`: `jsonb_build_object(key, value)` toma
+        value como tipo polimórfico `"any"`. asyncpg no puede inferir el tipo
+        del bind param y aborta con IndeterminateDatatypeError. El cast hace
+        que el planner sepa serializarlo como string JSON.
+        """
         res = await session.execute(
             text(
                 """
                 SELECT id_extraccion FROM dt_extraccion
                 WHERE anchors @> jsonb_build_object(
-                    'anchors', jsonb_build_array(jsonb_build_object('id', :id))
+                    'anchors', jsonb_build_array(jsonb_build_object('id', CAST(:id AS TEXT)))
                 )
                 LIMIT 1
                 """
